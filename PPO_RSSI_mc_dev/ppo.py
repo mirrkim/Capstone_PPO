@@ -15,8 +15,13 @@ class ActorCritic(nn.Module):
                    → Linear(action_dim) → Tanh
     출력: 행동 평균(mu) ∈ [-1, 1]
 
-    log_std: 학습 가능한 파라미터로 분산(탐험 강도)을 자동 조정
-    → std = exp(log_std) 로 변환 후 Normal 분포 생성
+    log_std: -0.5 고정 (std ≈ 0.6)
+    ─ 기존에는 학습 가능한 파라미터였기 때문에
+      entropy_coef 감소 + log_std 감소가 동시에 일어나는
+      "이중 탐험 억제" 문제가 있었음
+    ─ 고정함으로써 탐험량을 entropy_coef 하나로만 제어,
+      스케줄이 예측 가능하고 깔끔해짐
+    ─ std=0.6은 행동 다양성을 충분히 유지하는 값
 
     ── Critic ─────────────────────────────────────────────────────
     입력(state_dim) → Linear(256) → ReLU → Linear(256) → ReLU
@@ -37,8 +42,13 @@ class ActorCritic(nn.Module):
             nn.Tanh()          # 출력 범위를 [-1, 1] 로 제한
         )
 
-        # 탐험 노이즈 크기 (log 스케일로 저장 → 항상 양수 보장)
-        self.log_std = nn.Parameter(torch.zeros(1, action_dim))
+        # [수정] log_std 고정 (requires_grad=False)
+        # -0.5로 초기화 → std = exp(-0.5) ≈ 0.606
+        # entropy_coef(train.py 코사인 스케줄)만으로 탐험량 단일 제어
+        self.log_std = nn.Parameter(
+            torch.full((1, action_dim), -0.5),
+            requires_grad=False
+        )
 
         # Critic 네트워크: 상태 → 가치 추정
         self.critic = nn.Sequential(
@@ -75,15 +85,15 @@ class PPO:
     L_actor   = -min(surr1, surr2)          ← 정책 개선 손실
     L_critic  = MSE(V(s), R_t)             ← 가치 추정 손실
     L_entropy = -H(π)                       ← 탐험 장려 (보너스)
-    L_total   = L_actor + 0.5×L_critic - 0.015×L_entropy
+    L_total   = L_actor + 0.5×L_critic - entropy_coef×L_entropy
 
     하이퍼파라미터
     -------------
-    lr            : 1e-4  (Adam 학습률) # [멀티코어 수정: 학습률을 1e-4로 낮춰 안정적인 학습 유도]
+    lr            : 1e-4  (Adam 학습률)
     gamma         : 0.99  (할인율)
-    eps_clip      : 0.1   (클리핑 범위) # [멀티코어 수정: 클리핑 범위를 0.2에서 0.1로 줄여 더 보수적인 업데이트 유도]
+    eps_clip      : 0.1   (클리핑 범위)
     k_epochs      : 10    (같은 데이터로 반복 학습 횟수)
-    batch_size    : 64    (미니배치 크기) -> [멀티코어 수정: 1024로 증가]
+    batch_size    : 1024  (미니배치 크기)
     max_grad_norm : 0.5   (그래디언트 클리핑 임계값)
     """
 
@@ -92,30 +102,28 @@ class PPO:
         self.gamma        = gamma
         self.eps_clip     = eps_clip
         self.k_epochs     = 10
-        self.batch_size   = 1024 # [멀티코어 수정: GPU 활용을 위해 64에서 1024로 대폭 증가]
+        self.batch_size   = 1024
 
-        # [멀티코어 수정: CUDA(GPU)가 있으면 자동 할당, 없으면 CPU 사용]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"✅ PPO Device Set to: {self.device}")
 
-        self.policy    = ActorCritic(state_dim, action_dim).to(self.device) # [멀티코어 수정: 신경망을 Device로 이동]
+        self.policy    = ActorCritic(state_dim, action_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.mse_loss  = nn.MSELoss()
         self.reward_window = collections.deque(maxlen=50)
+
     # ──────────────────────────────────────────────────────────────
     def select_action(self, state):
         """
         학습 중 행동 선택 (탐험 포함)
         Normal 분포에서 샘플링 → 확률적 탐험
         """
-        # [멀티코어 수정: 여러 대의 드론 데이터를 한 번에 처리하므로 unsqueeze(0) 제거 및 device 할당]
         state = torch.FloatTensor(state).to(self.device)
         with torch.no_grad():
             dist, value = self.policy(state)
             action   = dist.sample()
             log_prob = dist.log_prob(action).sum(dim=-1)
-            
-        # [멀티코어 수정: GPU에서 계산된 텐서를 다시 CPU numpy 배열로 변환하여 환경에 전달]
+
         return action.cpu().numpy(), log_prob.cpu().numpy(), value.cpu().numpy().flatten()
 
     # ──────────────────────────────────────────────────────────────
@@ -124,7 +132,7 @@ class PPO:
         if current_reward >= max(self.reward_window):
             torch.save(self.policy.state_dict(), path)
             print(f"✨ New Best Saved: {current_reward:.2f}")
-            
+
     def update(self, memory, entropy_coef):
         """
         수집된 experience로 정책 업데이트
@@ -135,34 +143,31 @@ class PPO:
         4. k_epochs 반복 × 미니배치 셔플 → PPO 손실 역전파
         """
         # ── Tensor 변환 ───────────────────────────────────────────
-        # [멀티코어 수정: 2차원 배열(스텝×드론)을 device로 올림]
         states       = torch.FloatTensor(np.array(memory['states'])).to(self.device)
         actions      = torch.FloatTensor(np.array(memory['actions'])).to(self.device)
         old_log_probs= torch.FloatTensor(np.array(memory['log_probs'])).to(self.device)
-        
+
         rewards      = np.array(memory['rewards'])
         dones        = np.array(memory['dones'])
         values       = np.array(memory['values'])
 
         # ── 1. Discounted Return 계산 ─────────────────────────────
-        # 에피소드가 끝나면(done=True) 누적 보상 리셋
-        returns          = []
-        # [멀티코어 수정: 드론 32대 분량의 보상을 동시에 누적하도록 배열 연산으로 변경]
-        discounted_reward = np.zeros(rewards.shape[1]) 
+        returns           = []
+        discounted_reward = np.zeros(rewards.shape[1])
         for reward, done in zip(reversed(rewards), reversed(dones)):
-            discounted_reward = reward + (self.gamma * discounted_reward * (1 - done)) # [멀티코어 수정: done이 1이면 누적 보상 리셋]
+            discounted_reward = reward + (self.gamma * discounted_reward * (1 - done))
             returns.insert(0, discounted_reward)
 
         # ── 2. Return 정규화 ──────────────────────────────────────
-        returns = torch.FloatTensor(np.array(returns)).to(self.device) # [멀티코어 수정: device 할당]
+        returns = torch.FloatTensor(np.array(returns)).to(self.device)
         returns = (returns - returns.mean()) / (returns.std() + 1e-7)
 
         # ── 3. Advantage 계산 + 정규화 ────────────────────────────
-        values     = torch.FloatTensor(values).to(self.device) # [멀티코어 수정: device 할당]
+        values     = torch.FloatTensor(values).to(self.device)
         advantages = returns - values
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
-        # [멀티코어 수정: 여러 대의 드론이 수집한 데이터를 1차원으로 쫙 펴기 (Flatten) - 학습을 위해 섞기 위함]
+        # ── Flatten ───────────────────────────────────────────────
         b_states     = states.view(-1, states.shape[-1])
         b_actions    = actions.view(-1, actions.shape[-1])
         b_old_lp     = old_log_probs.view(-1)
@@ -170,7 +175,7 @@ class PPO:
         b_returns    = returns.view(-1)
 
         # ── 4. 미니배치 PPO 업데이트 ──────────────────────────────
-        dataset_size = b_states.shape[0] # [멀티코어 수정: 평탄화된 데이터 크기로 변경]
+        dataset_size = b_states.shape[0]
         indices      = np.arange(dataset_size)
 
         for _ in range(self.k_epochs):
@@ -179,7 +184,7 @@ class PPO:
                 end       = start + self.batch_size
                 batch_idx = indices[start:end]
 
-                mb_states     = b_states[batch_idx]     # [멀티코어 수정: b_states 등 평탄화된 변수명 사용]
+                mb_states     = b_states[batch_idx]
                 mb_actions    = b_actions[batch_idx]
                 mb_old_lp     = b_old_lp[batch_idx]
                 mb_advantages = b_advantages[batch_idx]
@@ -199,11 +204,10 @@ class PPO:
                 actor_loss  = -torch.min(surr1, surr2).mean()
                 critic_loss =  self.mse_loss(state_values.squeeze(), mb_returns)
 
-                # 총 손실: Actor + 0.5×Critic - 0.015×Entropy
+                # 총 손실: Actor + 0.5×Critic - entropy_coef×Entropy
                 loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy.mean()
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                # 그래디언트 폭주 방지 (norm 0.5 이내로 클리핑)
                 nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
                 self.optimizer.step()
