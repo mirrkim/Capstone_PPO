@@ -30,10 +30,9 @@ def make_env():
 def train():
     num_envs      = 64   # 한번에 날아가는 드론 수
     steps_per_env = 256  # 드론 수 * 4 로 유지 
-    max_updates   = 2000
-
+    max_updates   = 1000
     # ── 엔트로피 스케줄 파라미터 ────────────────────────────────────
-    # 구조: [0~warmup] 고정 → [warmup~max] 코사인 감소
+    # [warmup~max] 코사인 감소
     #
     # 기존 선형 감소의 문제:
     #   1. decay_limit(1000) 이후 500 업데이트가 min_entropy 고정 상태
@@ -51,10 +50,11 @@ def train():
     dummy_env = DroneEnv()
     agent     = PPO(dummy_env.state_dim, dummy_env.action_dim)
 
+#  이어서 학습하기
 #    if os.path.exists('ppo_drone_best.pth'):
 #        agent.policy.load_state_dict(torch.load('ppo_drone_best.pth'))
 #        print("🚀 [Load] 기존 베스트 모델을 로드했습니다.")
-
+#  
     episode_rewards  = []
     episode_endings  = []
     current_ep_rews  = np.zeros(num_envs)

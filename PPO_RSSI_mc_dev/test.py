@@ -7,13 +7,11 @@ import gymnasium as gym
 from gymnasium import spaces
 import os
 
-# env.py에서 설정한 상수들을 그대로 가져옵니다.
 from env import (DroneEnv, MAP_SIZE, 
                  BPSK_SIGNAL_RADIUS, QAM_SIGNAL_RADIUS,
                  TARGET_MODE)
 from ppo import PPO
 
-# --- Gymnasium 래퍼 클래스 (train.py와 동일하게 유지) ---
 class GymDroneEnv(gym.Env):
     def __init__(self):
         super().__init__()
@@ -23,7 +21,6 @@ class GymDroneEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        # 여기서 env.reset()이 호출되며 '장기 기억 감쇠(Decay)'가 실행됩니다.
         return self.env.reset(), {}
 
     def step(self, action):
@@ -36,8 +33,6 @@ def evaluate_and_animate():
     env = gym_env.env 
     agent = PPO(env.state_dim, env.action_dim)
 
-    # ── [핵심 수정 1] train.py에서 저장한 파일명에 맞춤 ────────────────
-    # 가장 똑똑한 모델(best)을 먼저 찾고, 없으면 최종 모델(final)을 가져옵니다.
     best_path = 'ppo_drone_best.pth'
     final_path = 'ppo_drone_final.pth'
     load_path = best_path if os.path.exists(best_path) else final_path
@@ -52,7 +47,6 @@ def evaluate_and_animate():
 
     print(f"=== 테스트 비행 시작 (타겟 모드: {TARGET_MODE}) ===")
 
-    # ── 시뮬레이션 실행 (결정론적 비행) ──────────────────────────
     state, _ = gym_env.reset()
     trajectory = [env.drone_pos.copy()]
     device = next(agent.policy.parameters()).device
@@ -61,7 +55,7 @@ def evaluate_and_animate():
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device) 
         with torch.no_grad():
             mu = agent.policy.actor(state_tensor)
-        action = mu.cpu().numpy()[0] # 테스트 시에는 확률적 샘플링 대신 평균값(mu) 사용
+        action = mu.cpu().numpy()[0] 
 
         next_state, reward, terminated, truncated, info = gym_env.step(action)
         done = terminated or truncated
@@ -74,11 +68,10 @@ def evaluate_and_animate():
 
     trajectory = np.array(trajectory)
 
-    # ── [핵심 수정 2] 시각화 레이아웃 최적화 ──────────────────────────
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
     fig.suptitle(f"Drone Mission Test: {load_path}", fontsize=14, fontweight='bold')
 
-    # [왼쪽] 비행 애니메이션 (실제 장애물 크기 반영)
+    # [왼쪽] 비행 애니메이션
     ax1.set_xlim(0, MAP_SIZE)
     ax1.set_ylim(0, MAP_SIZE)
     ax1.set_aspect('equal')
@@ -94,17 +87,19 @@ def evaluate_and_animate():
         ax1.add_patch(plt.Circle(qpos, QAM_SIGNAL_RADIUS, color='blue', alpha=0.08))
         ax1.plot(*qpos, 'bx', markersize=8, label='QAM (Jammer)' if i==0 else "")
 
-    # 장애물 시각화 (env.py에서 생성된 실제 반지름 r 사용)
-    for obs, r in zip(env.obstacles, env.obs_radii):
-        if r > 0:
-            ax1.add_patch(plt.Circle(obs, r, color='#333333', alpha=0.6))
+    # 🚀 [핵심 수정] 격자 맵(Occupancy Grid) 시각화 ───────────────────
+    # True(장애물)인 부분만 칠하기 위해 커스텀 컬러맵 사용
+    cmap = plt.cm.colors.ListedColormap(['none', '#333333'])
+    # origin='lower'를 통해 수학적 좌표계(좌하단 0,0)와 이미지 좌표계 일치시킴
+    ax1.imshow(env.occupancy, origin='lower', extent=[0, MAP_SIZE, 0, MAP_SIZE], cmap=cmap, alpha=0.6)
+    # ─────────────────────────────────────────────────────────────
 
     ax1.plot(*env.drone_start, 'go', markersize=10, label='Start')
     drone_dot, = ax1.plot([], [], 'o', color='magenta', markersize=8, zorder=10)
     path_line, = ax1.plot([], [], '-', color='magenta', alpha=0.5, linewidth=2)
     ax1.legend(loc='upper right', fontsize=8, ncol=2)
 
-    # [오른쪽] 학습 곡선 (rewards_history.npy 시각화)
+    # [오른쪽] 학습 곡선
     ax2.plot(rewards_history, color='lightgray', alpha=0.5, label='Raw Reward')
     if len(rewards_history) >= 50:
         ma = np.convolve(rewards_history, np.ones(50)/50, mode='valid')
