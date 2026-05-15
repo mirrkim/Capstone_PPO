@@ -1,6 +1,6 @@
 import numpy as np
 import collections
-import scipy.ndimage # 🚀 SDF(거리 맵) 생성을 위한 필수 라이브러리
+import scipy.ndimage 
 
 # =============================================
 # --- 환경 설정 상수 ---
@@ -8,7 +8,7 @@ import scipy.ndimage # 🚀 SDF(거리 맵) 생성을 위한 필수 라이브러
 MAP_SIZE           = 700
 START_POS          = np.array([30.0, 30.0])
 MIN_OBS_COUNT      = 4
-MAX_OBS_COUNT      = 8    # 모양이 섞이므로 갯수를 조금 넉넉히
+MAX_OBS_COUNT      = 8
 OBS_RADIUS_MIN     = 40.0 
 OBS_RADIUS_MAX     = 90.0 
 BPSK_SIGNAL_RADIUS  = 250
@@ -22,7 +22,7 @@ BELIEF_FREEZE_STEPS = int(MAP_SIZE * 0.01)
 
 _QAM_POS = np.array([[400.0, 200.0], [200.0, 400.0]])
 
-# ── 라이다(LiDAR) 설정 ─────────────────────────────────────────────
+# ── 라이다(LiDAR) 설정 ──
 NUM_LIDAR_RAYS  = 16      
 LIDAR_MAX_RANGE = 200.0   
 
@@ -44,27 +44,18 @@ class DroneEnv:
             for y in range(self.MACRO_N) for x in range(self.MACRO_N)
         ])
 
-        # 라이다 방향벡터 사전 계산
         _angles = np.linspace(0.0, 2.0 * np.pi, NUM_LIDAR_RAYS, endpoint=False)
         self._lidar_dirs = np.stack(
             [np.cos(_angles), np.sin(_angles)], axis=1
         ).astype(np.float32)
 
     def _generate_world(self):
-        """
-        [격자 기반 맵 생성] 
-        어떤 모양이든 픽셀(격자)에 색칠하듯 그려넣고, SDF(거리장)를 추출합니다.
-        """
-        # 1. 빈 캔버스(격자) 준비 (False: 빈 공간, True: 장애물)
         self.occupancy = np.zeros((int(self.map_size), int(self.map_size)), dtype=bool)
-
-        # 맵 외곽선을 장애물로 처리하여 라이다가 맵 밖을 벽으로 인식하게 함
         self.occupancy[0:2, :] = True
         self.occupancy[-2:, :] = True
         self.occupancy[:, 0:2] = True
         self.occupancy[:, -2:] = True
 
-        # 2. 다양한 형태의 장애물을 캔버스에 새기기 (도장 찍기)
         num_obs = np.random.randint(MIN_OBS_COUNT, MAX_OBS_COUNT + 1)
         y_grid, x_grid = np.ogrid[0:int(self.map_size), 0:int(self.map_size)]
 
@@ -74,106 +65,76 @@ class DroneEnv:
             px = np.random.uniform(r + 10, self.map_size - r - 10)
             py = np.random.uniform(r + 10, self.map_size - r - 10)
 
-            if px < 180 and py < 180: continue # 시작 지점 보호
+            if px < 180 and py < 180: continue 
 
             if obs_type == 'circle':
-                # 원형 격자 마스크 생성
                 mask = (x_grid - px)**2 + (y_grid - py)**2 <= r**2
                 self.occupancy[mask] = True
             else:
-                # 직사각형(건물) 격자 마스크 생성 (가로, 세로 비율 랜덤)
                 half_w = r * np.random.uniform(0.6, 1.2)
                 half_h = r * np.random.uniform(0.6, 1.2)
                 x_min, x_max = int(max(0, px - half_w)), int(min(self.map_size, px + half_w))
                 y_min, y_max = int(max(0, py - half_h)), int(min(self.map_size, py + half_h))
                 self.occupancy[y_min:y_max, x_min:x_max] = True
 
-        # 🚀 3. SDF (Signed Distance Field) 맵 생성! (연산 속도의 핵심)
-        # distance_transform_edt는 False(0)인 곳으로부터의 거리를 계산하므로
-        # 장애물(True)을 거꾸로 False(~occupancy)로 반전시켜 계산합니다.
         empty_space = ~self.occupancy
         self.sdf_map = scipy.ndimage.distance_transform_edt(empty_space).astype(np.float32)
 
-        # 4. 안전한 곳에 BPSK 타겟 배치 (SDF 맵 활용)
         while True:
             px, py = np.random.uniform(50, self.map_size - 50), np.random.uniform(50, self.map_size - 50)
             if px + py > self.map_size:
                 cx, cy = int(px), int(py)
-                # SDF 맵을 확인하여 장애물로부터 30픽셀 이상 떨어진 안전지대인지 확인
                 if self.sdf_map[cy, cx] >= 30.0:
                     self.bpsk_pos = np.array([px, py])
                     break
 
     def _min_dist_to_obs(self, pos):
-        """[수정] SDF 맵에서 좌표값만 읽어오면 끝! 연산량 O(1)"""
         cx = int(np.clip(pos[0], 0, self.map_size - 1))
         cy = int(np.clip(pos[1], 0, self.map_size - 1))
         return float(self.sdf_map[cy, cx])
 
     def _cast_lidar_rays(self, pos):
-        """
-        [수정] Sphere Tracing (구면 추적) 기법을 활용한 초고속 라이다.
-        조금씩 전진하는 게 아니라, SDF가 알려준 안전거리만큼 한 번에 '점프'합니다.
-        """
         t = np.zeros(NUM_LIDAR_RAYS, dtype=np.float32)
-
-        # 그래픽스 렌더링에서 쓰는 Ray Marching 최대 반복 횟수
         for _ in range(30):
             curr_pos = pos + t[:, None] * self._lidar_dirs
             cx = np.clip(curr_pos[:, 0], 0, self.map_size - 1).astype(int)
             cy = np.clip(curr_pos[:, 1], 0, self.map_size - 1).astype(int)
-
-            # 현재 광선 끝점들에서의 장애물까지의 거리
             dists = self.sdf_map[cy, cx]
-            
-            # 안전거리(dists)만큼 광선을 한 번에 연장
             t += dists
-
-            # 모든 광선이 벽에 박았거나(거리 1픽셀 미만), 최대 거리에 도달하면 루프 종료
             if np.all((dists < 1.0) | (t >= LIDAR_MAX_RANGE)):
                 break
-
         return np.clip(t / LIDAR_MAX_RANGE, 0.0, 1.0)
 
     def _path_blocked(self, A, B, margin=20.0):
-        """[수정] 선분 AB를 일정 간격으로 쪼개서 SDF 맵을 스캔"""
         dist_AB = np.linalg.norm(B - A)
         if dist_AB < 1.0: return False
-        
-        steps = max(2, int(dist_AB / 5.0)) # 5픽셀 단위로 샘플링
+        steps = max(2, int(dist_AB / 5.0))
         t_vals = np.linspace(0, 1, steps)
         pts = A + t_vals[:, None] * (B - A)
-
         cx = np.clip(pts[:, 0], 0, self.map_size - 1).astype(int)
         cy = np.clip(pts[:, 1], 0, self.map_size - 1).astype(int)
-        
         min_d = np.min(self.sdf_map[cy, cx])
         return bool(min_d < margin)
 
     def _path_danger_cost(self, A, B, margin=15.0):
-        """[수정] 경로 상에 margin보다 가까운 위험 요소(SDF 값)들의 합산 비용"""
         dist_AB = np.linalg.norm(B - A)
         if dist_AB < 1.0: return 0.0
-        
         steps = max(2, int(dist_AB / 5.0))
         t_vals = np.linspace(0, 1, steps)
         pts = A + t_vals[:, None] * (B - A)
-
         cx = np.clip(pts[:, 0], 0, self.map_size - 1).astype(int)
         cy = np.clip(pts[:, 1], 0, self.map_size - 1).astype(int)
-        
         dists = self.sdf_map[cy, cx]
         hit = dists < margin
         return float(np.sum(margin - dists[hit]))
 
-    def _calc_soft_penalty(self, pos, min_dist_obs, obs_margin=50.0, wall_margin=30.0, near_crash_margin=20.0, in_signal=False):
+    def _calc_soft_penalty(self, pos, min_dist_obs, obs_margin=50.0, near_crash_margin=20.0, in_signal=False):
         scale = 2.0 if in_signal else 1.0
         soft = 0.0
         if min_dist_obs < obs_margin:
             soft -= ((obs_margin - min_dist_obs) / obs_margin) ** 2 * 150.0 * scale
         if min_dist_obs < near_crash_margin:
             soft -= 300.0 * scale
-
         return soft
 
     def reset(self):
@@ -224,7 +185,6 @@ class DroneEnv:
         
         state.extend(self.belief)
         state.extend(self._cast_lidar_rays(self.drone_pos))
-
         return np.array(state, dtype=np.float32)
 
     def step(self, action):
@@ -232,8 +192,10 @@ class DroneEnv:
         pre_min_dist  = self._min_dist_to_obs(self.drone_pos)
         pre_wall_dist = float(min(self.drone_pos[0], self.drone_pos[1],
                                   self.map_size - self.drone_pos[0], self.map_size - self.drone_pos[1]))
+        
         danger_level = max(1.0 - np.clip(pre_min_dist / 50.0, 0.0, 1.0),
                            1.0 - np.clip(pre_wall_dist / 50.0, 0.0, 1.0))
+        
         alpha    = 0.40 + 0.40 * danger_level
         velocity = action * alpha + self.prev_action * (1.0 - alpha)
         v_norm   = np.linalg.norm(velocity)
@@ -244,7 +206,6 @@ class DroneEnv:
         if new_pos[0] < 0 or new_pos[0] > self.map_size or new_pos[1] < 0 or new_pos[1] > self.map_size:
             return self.get_state(), -2000.0, True, "Wall Crash"
         
-        # 🚀 [수정] 충돌 판정도 SDF로 처리 (가장 가까운 장애물 거리가 0 근처면 충돌)
         if self._min_dist_to_obs(new_pos) < 2.0:
             return self.get_state(), -3000.0, True, "Obs Crash"
 
@@ -276,10 +237,7 @@ class DroneEnv:
         else:
             self.macro_entry_freeze = 0
 
-        if curr_bpsk > 0.0:
-            self.belief[:] = 0.0
-            self.belief[quad_idx] = 1.0
-        else:
+        if curr_bpsk == 0.0:  
             if self.macro_entry_freeze == 0:
                 over_steps = steps_here - BELIEF_FREEZE_STEPS
                 dynamic_decay = max(0.80, 0.96 - (over_steps * 0.008)) 
@@ -301,33 +259,49 @@ class DroneEnv:
             signal_reward = (rssi_diff_rew + proximity_reward) * safety_factor
             reward = step_penalty + signal_reward + soft_penalty + macro_crossing_bonus
         else:
+            # 🚀 [탐색 모드 개선] 0% 구역 탈출 및 '방향 지향' 로직
             self.search_vec = velocity.copy()
             temp_belief = self.belief.copy()
             temp_belief[quad_idx] = -1.0
             max_p      = float(np.max(temp_belief))
-            candidates = np.where(np.isclose(temp_belief, max_p))[0]
+            
+            # 확률이 동일한 후보 구역들을 모두 찾습니다 (오차 범위 1e-5 허용)
+            candidates = np.where(np.isclose(temp_belief, max_p, atol=1e-5))[0]
 
-            if self.chosen_target in candidates:
-                best_target = self.chosen_target
+            # 🚀 [수정 핵심] 후보가 여러 개라면 '고집' 부리지 말고 무조건 '가장 안전한 곳'을 다시 찾습니다.
+            if len(candidates) > 1:
+                target_centers = self.macro_centers[candidates]
+                dist_costs = np.linalg.norm(target_centers - self.drone_pos, axis=1)
+                danger_costs = np.array([self._path_danger_cost(self.drone_pos, tc) for tc in target_centers])
+                dest_danger = np.array([max(0.0, 80.0 - self._min_dist_to_obs(tc)) for tc in target_centers])
+                
+                # 유저님이 만드신 '장애물 적은 구역 우선' 로직이 매 스텝 강제 실행됩니다.
+                total_costs  = dist_costs + danger_costs * 15.0 + dest_danger * 40.0
+                best_target  = int(candidates[np.argmin(total_costs)])
             else:
-                if len(candidates) > 1:
-                    target_centers = self.macro_centers[candidates]
-                    dist_costs = np.linalg.norm(target_centers - self.drone_pos, axis=1)
-                    danger_costs = np.array([self._path_danger_cost(self.drone_pos, tc) for tc in target_centers])
-                    dest_danger = np.array([max(0.0, 80.0 - self._min_dist_to_obs(tc)) for tc in target_centers])
-                    total_costs  = dist_costs + danger_costs * 15.0 + dest_danger * 30.0
-                    best_target  = int(candidates[np.argmin(total_costs)])
-                else:
-                    best_target = int(candidates[0])
-                self.chosen_target = best_target
+                best_target = int(candidates[0])
+                
+            self.chosen_target = best_target
 
+            # 🚀 [방향 지향 패치] 단순히 점을 쫓지 않고 그 '방향'으로 뚫고 가게 유도
             target_pos    = self.macro_centers[best_target]
-            dir_to_target = target_pos - self.drone_pos
-            dir_to_target /= np.linalg.norm(dir_to_target) + 1e-8
+            diff_vec      = target_pos - self.drone_pos
+            dist_to_goal  = np.linalg.norm(diff_vec)
+            
+            # 목표 구역 중심점에 도달할수록 벡터가 작아져서 맴도는 것을 방지 (Normalization)
+            dir_to_target = diff_vec / (dist_to_goal + 1e-8)
+            
+            # 현재 내가 0% 구역에 있다면 탈출 가중치를 대폭 상향
+            is_in_zero_zone = self.belief[quad_idx] < 0.01
+            escape_weight = 2.5 if is_in_zero_zone else 1.0
+            
             belief_diff  = float(np.clip(self.belief[best_target] - self.belief[quad_idx], 0.0, 0.5))
             dot_val = float(np.dot(velocity, dir_to_target))
-            multiplier = 150.0 + belief_diff * 500.0
+            
+            # 방향 일치도에 따른 보상 계산
+            multiplier = (150.0 + belief_diff * 600.0) * escape_weight
             drive_reward = dot_val * multiplier
+            
             reward = step_penalty + drive_reward + soft_penalty + macro_crossing_bonus
 
         self.prev_bpsk_rssi = curr_bpsk
