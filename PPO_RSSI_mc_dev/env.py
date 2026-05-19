@@ -149,6 +149,9 @@ class DroneEnv:
         self.macro_entry_freeze = 0
         self.visited_quad_history = collections.deque(maxlen=self.macro_count)
         self.chosen_target = -1
+        self.target_lock_steps = 0      # 목표 고정 잔여 스텝
+        self.prev_dist_to_target = None # 이전 스텝의 목표까지 거리
+        self.target_history = collections.deque(maxlen=2)  # 최근 선택 타겟 (핑퐁 방지)
         self._generate_world()
         return self.get_state()
 
@@ -258,51 +261,94 @@ class DroneEnv:
                 rssi_diff_rew    *= 0.3
             signal_reward = (rssi_diff_rew + proximity_reward) * safety_factor
             reward = step_penalty + signal_reward + soft_penalty + macro_crossing_bonus
-        else:
-            # 🚀 [탐색 모드 개선] 0% 구역 탈출 및 '방향 지향' 로직
+        else: # 탐색 모드 (curr_bpsk == 0.0)
             self.search_vec = velocity.copy()
-            temp_belief = self.belief.copy()
-            temp_belief[quad_idx] = -1.0
-            max_p      = float(np.max(temp_belief))
-            
-            # 확률이 동일한 후보 구역들을 모두 찾습니다 (오차 범위 1e-5 허용)
-            candidates = np.where(np.isclose(temp_belief, max_p, atol=1e-5))[0]
 
-            # 🚀 [수정 핵심] 후보가 여러 개라면 '고집' 부리지 말고 무조건 '가장 안전한 곳'을 다시 찾습니다.
-            if len(candidates) > 1:
-                target_centers = self.macro_centers[candidates]
-                dist_costs = np.linalg.norm(target_centers - self.drone_pos, axis=1)
-                danger_costs = np.array([self._path_danger_cost(self.drone_pos, tc) for tc in target_centers])
-                dest_danger = np.array([max(0.0, 80.0 - self._min_dist_to_obs(tc)) for tc in target_centers])
-                
-                # 유저님이 만드신 '장애물 적은 구역 우선' 로직이 매 스텝 강제 실행됩니다.
-                total_costs  = dist_costs + danger_costs * 15.0 + dest_danger * 40.0
-                best_target  = int(candidates[np.argmin(total_costs)])
+            # ── 목표 고정(lock) 로직 ──
+            # chosen_target이 없거나(-1), 현재 구역과 같거나, lock이 만료됐을 때만 재계산
+            # ── 타겟 재선택 조건 ──
+            # 1) 타겟 없음  2) lock 만료  3) 현재 구역 == 타겟 구역
+            # lock 만료 시에는 hysteresis: 현재 타겟보다 belief가 5% 이상 높아야 교체
+            HYSTERESIS = 0.05
+            lock_expired = self.target_lock_steps <= 0
+            # 목표 구역에 진입했으면 즉시 lock 해제 → 새 목표 선택
+            entered_target = (self.chosen_target == quad_idx)
+            if entered_target:
+                self.target_lock_steps = 0
+
+            if lock_expired and self.chosen_target != -1 and not entered_target:
+                curr_target_belief = self.belief[self.chosen_target]
+                best_other = max(
+                    (self.belief[i] for i in range(self.macro_count)
+                     if i != quad_idx and i != self.chosen_target),
+                    default=0.0
+                )
+                should_switch = best_other > curr_target_belief + HYSTERESIS
             else:
-                best_target = int(candidates[0])
-                
-            self.chosen_target = best_target
+                should_switch = False
 
-            # 🚀 [방향 지향 패치] 단순히 점을 쫓지 않고 그 '방향'으로 뚫고 가게 유도
+            need_retarget = (
+                self.chosen_target == -1
+                or entered_target
+                or should_switch
+            )
+
+            if need_retarget:
+                temp_belief = self.belief.copy()
+                temp_belief[quad_idx] = -1.0  # 현재 구역 제외
+                # 최근 방문한 타겟도 제외 (핑퐁 방지)
+                for prev_t in self.target_history:
+                    if prev_t != quad_idx:
+                        temp_belief[prev_t] = max(temp_belief[prev_t] - 0.15, -1.0)
+
+                max_p = float(np.max(temp_belief))
+                candidates = np.where(np.isclose(temp_belief, max_p, atol=1e-5))[0]
+
+                if len(candidates) > 1:
+                    target_centers = self.macro_centers[candidates]
+                    danger_costs = np.array([self._path_danger_cost(self.drone_pos, tc) for tc in target_centers])
+                    dest_danger = np.array([max(0.0, 80.0 - self._min_dist_to_obs(tc)) for tc in target_centers])
+                    total_costs  = danger_costs * 6.0 + dest_danger * 15.0  # 장애물 기피 완화
+                    best_target  = int(candidates[np.argmin(total_costs)])
+                else:
+                    best_target = int(candidates[0])
+
+                if self.chosen_target != -1:
+                    self.target_history.append(self.chosen_target)
+                self.chosen_target = best_target
+                self.target_lock_steps = 20  # 최소 20스텝 고정
+                self.prev_dist_to_target = None  # 목표 바뀌면 거리 기준 초기화
+            else:
+                best_target = self.chosen_target
+                self.target_lock_steps -= 1  # 잔여 고정 스텝 차감
+
+            # 목표 방향으로 드론을 유도하는 로직
             target_pos    = self.macro_centers[best_target]
             diff_vec      = target_pos - self.drone_pos
             dist_to_goal  = np.linalg.norm(diff_vec)
-            
-            # 목표 구역 중심점에 도달할수록 벡터가 작아져서 맴도는 것을 방지 (Normalization)
             dir_to_target = diff_vec / (dist_to_goal + 1e-8)
-            
-            # 현재 내가 0% 구역에 있다면 탈출 가중치를 대폭 상향
+
             is_in_zero_zone = self.belief[quad_idx] < 0.01
             escape_weight = 2.5 if is_in_zero_zone else 1.0
-            
+
             belief_diff  = float(np.clip(self.belief[best_target] - self.belief[quad_idx], 0.0, 0.5))
             dot_val = float(np.dot(velocity, dir_to_target))
-            
-            # 방향 일치도에 따른 보상 계산
+
             multiplier = (150.0 + belief_diff * 600.0) * escape_weight
             drive_reward = dot_val * multiplier
-            
-            reward = step_penalty + drive_reward + soft_penalty + macro_crossing_bonus
+
+            # ── 거리 감소 보상 ──
+            # 가까워진 만큼 보상, 멀어지면 패널티
+            # dist_scale: 멀리 있을수록 보상을 키워 강하게 유도
+            if self.prev_dist_to_target is not None:
+                dist_delta = self.prev_dist_to_target - dist_to_goal  # 양수 = 가까워짐
+                dist_scale = float(np.clip(dist_to_goal / (self.map_size * 0.5), 0.3, 1.5))
+                approach_reward = dist_delta * 40.0 * dist_scale
+            else:
+                approach_reward = 0.0
+            self.prev_dist_to_target = dist_to_goal
+
+            reward = step_penalty + drive_reward + approach_reward + soft_penalty + macro_crossing_bonus
 
         self.prev_bpsk_rssi = curr_bpsk
         return self.get_state(), reward, self.steps >= MAX_STEPS, "Normal"

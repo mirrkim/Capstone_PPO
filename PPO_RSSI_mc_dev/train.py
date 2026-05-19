@@ -28,8 +28,8 @@ def make_env():
     return GymDroneEnv()
 
 def train():
-    num_envs      = 64   # 한번에 날아가는 드론 수
-    steps_per_env = 256  # 드론 수 * 4 로 유지 
+    num_envs      = 32   # 한번에 날아가는 드론 수
+    steps_per_env = 128  # 드론 수 * 4 로 유지 
     max_updates   = 1000
     # ── 엔트로피 스케줄 파라미터 ────────────────────────────────────
     # [warmup~max] 코사인 감소
