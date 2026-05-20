@@ -14,6 +14,10 @@ import numpy as np
 import torch
 import scipy.ndimage
 
+# 지금은 ex_of_localization로 적긴 했는데 실제로 파일이름 적을 땐 여기 수정하면 돼
+from ex_of_localization import run_exlocalization
+
+
 from env import (DroneEnv, MAP_SIZE,
                  BPSK_SIGNAL_RADIUS, QAM_SIGNAL_RADIUS,
                  NUM_LIDAR_RAYS, LIDAR_MAX_RANGE, _QAM_POS)
@@ -424,7 +428,8 @@ class App:
         self.mode = 'running'
 
         # 뒤로 버튼
-        self.btn_back = Button((MAP_PX + 12, WIN_H - 58, 292, 46), '◀  Back to Editor')
+        self.btn_back         = Button((MAP_PX + 12, WIN_H - 58, 292, 46), '◀  Back to Editor')
+        self.btn_localization = Button((MAP_PX + 12, WIN_H - 112, 292, 46), '🔍  Localization')
 
     # =================================================================
     #  시뮬레이션 스텝 (1 프레임에 1 스텝)
@@ -460,6 +465,9 @@ class App:
                 pygame.quit(); sys.exit()
             if self.btn_back.hit(ev):
                 self._init_editor()
+            if (self.sim_result == 'Target Found'
+                    and self.btn_localization.hit(ev)):
+                self._run_localization()
 
     # =================================================================
     #  시뮬레이션 렌더링
@@ -603,8 +611,26 @@ class App:
             pygame.draw.circle(self.screen, (rc, gc, 40), (ex, ey), 2)
         pygame.draw.circle(self.screen, DRONE_COL, (radar_cx, radar_cy), 4)
 
+        # Localization 버튼 (Target Found 시에만 표시)
+        if self.sim_result == 'Target Found':
+            self.btn_localization.draw(self.screen, self.fn_m)
+
         # 뒤로 버튼
         self.btn_back.draw(self.screen, self.fn_m)
+
+    # =================================================================
+    #  Localization 호출
+    # =================================================================
+    def _run_localization(self):
+        """Target Found 후 Localization 버튼 클릭 시 호출"""
+        result = run_localization(
+            occupancy_map = self.env.occupancy.copy(),
+            sdf_map       = self.env.sdf_map.copy(),
+            target_pos    = self.env.bpsk_pos.copy(),
+            drone_pos     = self.env.drone_pos.copy(),
+        )
+        # result 딕셔너리를 시뮬레이터 속성으로 보관 (필요 시 렌더링에 활용)
+        self.localization_result = result
 
     # =================================================================
     #  메인 루프
