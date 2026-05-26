@@ -16,6 +16,7 @@ def setup_environment():
         "osmnx",          # OpenStreetMap 건물 데이터 (광운대 맵)
         "shapely",        # 건물 폴리곤 교차 판정
         "requests",       # OpenTopography API 호출
+    
     ])
 
     print("\n🔥 RTX 5070 전용 PyTorch 설치 중 (CUDA 12.8 기반)...")
