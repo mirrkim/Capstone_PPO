@@ -1,7 +1,6 @@
 import numpy as np
 import collections
-import scipy.ndimage
-import os 
+import scipy.ndimage 
 
 # =============================================
 # --- 환경 설정 상수 ---
@@ -17,8 +16,6 @@ QAM_SIGNAL_RADIUS   = 150
 TARGET_RSSI_THRESHOLD = 0.85
 MAX_STEPS = 512
 TARGET_MODE = 'random'
-
-AMC_CLASSIFY_INTERVAL = 5    # 한 번 감지하면 9999스텝 동안 결과 고정!
 
 BELIEF_DECAY        = 0.95
 BELIEF_FREEZE_STEPS = int(MAP_SIZE * 0.01)   
@@ -46,22 +43,6 @@ class DroneEnv:
             [step_size * x + step_size / 2.0, step_size * y + step_size / 2.0]
             for y in range(self.MACRO_N) for x in range(self.MACRO_N)
         ])
-
-        # ── AMC (자동 변조 분류) ──────────────────────────────────
-        self.detected_signal_type = 0   # 0=없음  1=BPSK  2=QAM
-        self._amc_cache_steps = 0
-        self._amc_cache_type  = 0
-        self._amc_model  = None
-        self._rml_raw    = None
-        self._mods       = None
-        self._snrs_list  = None
-        _has_model = os.path.exists('my_amc_model.h5')
-        _has_data  = os.path.exists('RML2016.10a_dict.dat')
-        self.use_amc = _has_model and _has_data
-        if self.use_amc:
-            self._load_amc()
-        else:
-            print('[AMC] 모델/데이터 없음 → 거리 기반 완벽 분류 사용')
 
         _angles = np.linspace(0.0, 2.0 * np.pi, NUM_LIDAR_RAYS, endpoint=False)
         self._lidar_dirs = np.stack(
@@ -167,9 +148,6 @@ class DroneEnv:
         self.current_macro = -1
         self.macro_entry_freeze = 0
         self.visited_quad_history = collections.deque(maxlen=self.macro_count)
-        self.detected_signal_type = 0
-        self._amc_cache_steps = 0
-        self._amc_cache_type  = 0
         self.chosen_target = -1
         self.target_lock_steps = 0      # 목표 고정 잔여 스텝
         self.prev_dist_to_target = None # 이전 스텝의 목표까지 거리
@@ -177,103 +155,12 @@ class DroneEnv:
         self._generate_world()
         return self.get_state()
 
-    # =================================================================
-    #  AMC (자동 변조 분류)
-    # =================================================================
-    def _load_amc(self):
-        """my_amc_model.h5 와 RML2016.10a_dict.dat 로드"""
-        try:
-            import tensorflow as tf
-            self._amc_model = tf.keras.models.load_model('my_amc_model.h5')
-            print('[AMC] CNN 모델 로드 완료')
-        except Exception as e:
-            print(f'[AMC] 모델 로드 실패: {e}')
-            self._amc_model = None
-
-        try:
-            import pickle
-            with open('RML2016.10a_dict.dat', 'rb') as f:
-                self._rml_raw = pickle.load(f, encoding='latin1')
-            self._mods      = sorted(set(k[0] for k in self._rml_raw.keys()))
-            self._snrs_list = sorted(set(k[1] for k in self._rml_raw.keys()))
-            print(f'[AMC] 데이터셋 로드 완료  변조: {self._mods}')
-        except Exception as e:
-            print(f'[AMC] 데이터셋 로드 실패: {e}')
-            self._rml_raw = None
-
-    def _rssi_to_snr(self, rssi):
-        if self._snrs_list:
-            return max(self._snrs_list)  # 리스트에 있는 값 중 무조건 제일 큰 값(예: 18) 선택
-        return 18
-
-    def _classify_signal(self, mod_type, rssi):
-        """
-        RML2016 샘플을 AMC CNN으로 분류
-        Returns: 예측 변조 방식 문자열 (모델 없으면 mod_type 그대로)
-        """
-        if self._amc_model is None or self._rml_raw is None:
-            return mod_type   # 폴백: 완벽 분류
-
-        target_snr = self._rssi_to_snr(rssi)
-        samples = self._rml_raw.get((mod_type, target_snr))
-        if samples is None:
-            return mod_type
-
-        sig = samples[np.random.randint(len(samples))]  # (2, 128)
-        ai_input = sig.T[np.newaxis, ...]               # (1, 128, 2)
-        # model() 직접 호출 — predict()보다 빠름
-        pred = self._amc_model(ai_input, training=False).numpy()[0]
-        return self._mods[int(np.argmax(pred))]
-
-    def get_amc_rssi(self, pos):
-        """
-        AMC 분류 결과 기반 BPSK RSSI 반환
-        - BPSK로 분류 → 실제 RSSI 반환 (드론이 찾으러 감)
-        - QAM으로 분류 → 0 반환        (무시)
-        Returns: (reward_bpsk_rssi, signal_type)   signal_type: 0/1/2
-        """
-        raw_bpsk = self.get_bpsk_rssi(pos)
-        raw_qam  = max(
-            (max(0.0, 1.0 - np.linalg.norm(qp - pos) / QAM_SIGNAL_RADIUS)
-             for qp in self.qam_pos
-             if np.linalg.norm(qp - pos) < QAM_SIGNAL_RADIUS),
-            default=0.0
-        )
-
-        if raw_bpsk == 0.0 and raw_qam == 0.0:
-            # 신호 범위를 벗어나도 이전 감지 상태(detected_signal_type) 유지
-            return 0.0, self.detected_signal_type
-
-        # 캐시 유효
-        if self._amc_cache_steps > 0:
-            self._amc_cache_steps -= 1
-            self.detected_signal_type = self._amc_cache_type
-            return (raw_bpsk if self._amc_cache_type == 1 else 0.0), self._amc_cache_type
-
-        # AMC 분류 실행
-        if raw_bpsk >= raw_qam:
-            pred = self._classify_signal('BPSK',  raw_bpsk)
-        else:
-            pred = self._classify_signal('QAM16', raw_qam)
-
-        if pred == 'BPSK':
-            sig_type, reward_rssi = 1, raw_bpsk
-        elif pred in ('QAM16', 'QAM64'):
-            sig_type, reward_rssi = 2, 0.0
-        else:
-            sig_type, reward_rssi = 0, 0.0
-
-        self._amc_cache_type  = sig_type
-        self._amc_cache_steps = AMC_CLASSIFY_INTERVAL
-        self.detected_signal_type = sig_type
-        return reward_rssi, sig_type
-
     def get_bpsk_rssi(self, pos):
         dist = np.linalg.norm(self.bpsk_pos - pos)
         return max(0.0, 1.0 - dist / BPSK_SIGNAL_RADIUS) if dist < BPSK_SIGNAL_RADIUS else 0.0
 
     def get_state(self):
-        curr_bpsk, _ = self.get_amc_rssi(self.drone_pos)
+        curr_bpsk = self.get_bpsk_rssi(self.drone_pos)
         if curr_bpsk > 0.0:
             diff = self.bpsk_pos - self.drone_pos
             sensor_dir = diff / (np.linalg.norm(diff) + 1e-8)
@@ -327,7 +214,7 @@ class DroneEnv:
 
         self.drone_pos = new_pos
         self.steps    += 1
-        curr_bpsk, _sig_type = self.get_amc_rssi(new_pos)
+        curr_bpsk  = self.get_bpsk_rssi(new_pos)
         bpsk_diff  = curr_bpsk - self.prev_bpsk_rssi
         min_dist_to_obs = self._min_dist_to_obs(new_pos)
         soft_penalty = self._calc_soft_penalty(new_pos, min_dist_to_obs, in_signal=(curr_bpsk > 0.0))

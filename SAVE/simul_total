@@ -22,7 +22,7 @@ from localization import run_localization
 
 from env import (DroneEnv, MAP_SIZE,
                  BPSK_SIGNAL_RADIUS, QAM_SIGNAL_RADIUS,
-                 TARGET_RSSI_THRESHOLD, MAX_STEPS, 
+                 TARGET_RSSI_THRESHOLD,
                  NUM_LIDAR_RAYS, LIDAR_MAX_RANGE, _QAM_POS)
 from ppo import PPO
 
@@ -216,7 +216,7 @@ class App:
             except Exception as e:
                 print(f'[Error] 맵 로드 실패: {e}')
         else:
-            print(f'[Warning] {filepath} none. combination_map.py를 먼저 실행하세요.')
+            print(f'[Warning] {filepath} 없음. combination_map.py를 먼저 실행하세요.')
 
     # =================================================================
     #  점유 격자 → 렌더 서피스 (캐시)
@@ -1305,34 +1305,6 @@ class App:
                 small_row('Std:', ', '.join(f"{v:.1f}" for v in res['rssi_std']))
 
         else:
-            # ── Steps / Reward ────────────────────────────────────────────
-            row('Steps  :', f'{self.step_count} / {MAX_STEPS}')
-            r_col = OK_COL if self.last_reward >= 0 else ERR_COL
-            row('Step R :', f'{self.last_reward:+.1f}', r_col)
-            t_col = OK_COL if self.total_reward >= 0 else ERR_COL
-            t_str = f'+{self.total_reward:.1f}' if self.total_reward >= 0 else f'{self.total_reward:.1f}'
-            row('Total R:', t_str, t_col)
-
-            pygame.draw.line(self.screen, (58, 63, 82), (px+8, y), (px+PANEL_W-8, y)); y += 8
-
-            # ── Signal Detection (AMC) ────────────────────────────────────
-            self.screen.blit(self.fn_m.render('Signal', True, TITLE_COL), (px + 14, y)); y += 4
-            sig_type  = getattr(self.env, 'detected_signal_type', 0)
-            sig_names = {0: 'none', 1: 'BPSK', 2: 'QAM'}
-            sig_cols  = {0: DIM_COL, 1: BPSK_COL, 2: QAM_COL}
-            sig_text  = sig_names.get(sig_type, 'none')
-            sig_col   = sig_cols.get(sig_type, DIM_COL)
-            # 감지 상태 박스
-            sig_rect = pygame.Rect(px + 14, y, PANEL_W - 28, 28)
-            pygame.draw.rect(self.screen, (30, 34, 48), sig_rect, border_radius=5)
-            if sig_type != 0:
-                pygame.draw.rect(self.screen, sig_col, sig_rect, 1, border_radius=5)
-            sig_surf = self.fn_l.render(sig_text, True, sig_col)
-            self.screen.blit(sig_surf, sig_surf.get_rect(center=sig_rect.center))
-            y += 36
-
-            pygame.draw.line(self.screen, (58, 63, 82), (px+8, y), (px+PANEL_W-8, y)); y += 8
-
             # ── Belief 3×3 히트맵 ────────────────────────────────────────
             self.screen.blit(self.fn_m.render('Belief Map', True, TITLE_COL), (px + 14, y)); y += 22
             cell = 90
