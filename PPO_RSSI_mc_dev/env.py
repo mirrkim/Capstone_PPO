@@ -1,15 +1,31 @@
+import os
+# ── TensorFlow / NumPy 로그·경고 억제 (반드시 TF import 보다 먼저) ──
+# 0=all, 1=INFO 숨김, 2=WARNING 숨김, 3=ERROR만
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
+os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')   # oneDNN 안내 메시지 제거
+os.environ.setdefault('TF_CPP_MIN_VLOG_LEVEL', '3')
+
+import warnings
+# RML 데이터셋을 pickle.load 할 때 NumPy가 내는 dtype align 폐기예정 경고 억제
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 import numpy as np
 import collections
 import scipy.ndimage
-import os 
+
+# NumPy 버전에 따라 존재하는 전용 경고 클래스도 함께 억제
+try:
+    warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)
+except AttributeError:
+    pass
 
 # =============================================
 # --- 환경 설정 상수 ---
 # =============================================
 MAP_SIZE           = 700
 START_POS          = np.array([30.0, 30.0])
-MIN_OBS_COUNT      = 4
-MAX_OBS_COUNT      = 8
+MIN_OBS_COUNT      = 5
+MAX_OBS_COUNT      = 7
 OBS_RADIUS_MIN     = 40.0 
 OBS_RADIUS_MAX     = 90.0 
 BPSK_SIGNAL_RADIUS  = 250
@@ -184,7 +200,21 @@ class DroneEnv:
         """my_amc_model.h5 와 RML2016.10a_dict.dat 로드"""
         try:
             import tensorflow as tf
-            self._amc_model = tf.keras.models.load_model('my_amc_model.h5')
+            # Python 레벨 TF 로거도 ERROR만 남기도록 (환경변수와 별개로 한 번 더)
+            tf.get_logger().setLevel('ERROR')
+            try:
+                tf.autograph.set_verbosity(0)
+            except Exception:
+                pass
+            # absl 로깅 억제: "All log messages before absl::InitializeLog()..." 경고 제거
+            try:
+                from absl import logging as absl_logging
+                absl_logging.set_verbosity(absl_logging.ERROR)
+                absl_logging.use_absl_handler()
+            except Exception:
+                pass
+            # compile=False: 추론만 하므로 metric 컴파일 생략 → compile_metrics 경고 제거
+            self._amc_model = tf.keras.models.load_model('my_amc_model.h5', compile=False)
             print('[AMC] CNN 모델 로드 완료')
         except Exception as e:
             print(f'[AMC] 모델 로드 실패: {e}')
@@ -384,8 +414,11 @@ class DroneEnv:
             # lock 만료 시에는 hysteresis: 현재 타겟보다 belief가 5% 이상 높아야 교체
             HYSTERESIS = 0.05
             lock_expired = self.target_lock_steps <= 0
-            # 목표 구역에 진입했으면 즉시 lock 해제 → 새 목표 선택
-            entered_target = (self.chosen_target == quad_idx)
+            # [수정 B] 목표 구역에 '스치기만' 해도 lock이 풀려 재선택이 트리거되던 문제 수정.
+            # 목표 구역에 도달한 뒤, 그 구역에서 최소 탐색 시간(BELIEF_FREEZE_STEPS)을
+            # 채웠을 때만 도달로 인정하고 lock을 해제한다. 빙글빙글 돌며 목표 구역을
+            # 잠깐 통과하는 것만으로 재평가가 일어나는 출렁임을 줄인다.
+            entered_target = (self.chosen_target == quad_idx) and (steps_here > BELIEF_FREEZE_STEPS)
             if entered_target:
                 self.target_lock_steps = 0
 
@@ -419,7 +452,12 @@ class DroneEnv:
 
                 if len(candidates) > 1:
                     target_centers = self.macro_centers[candidates]
-                    danger_costs = np.array([self._path_danger_cost(self.drone_pos, tc) for tc in target_centers])
+                    # [수정 A] 경로 위험도 평가의 출발점을 드론의 실시간 위치가 아니라
+                    # '현재 구역의 중심'으로 고정한다. 드론이 구역 안에서 빙글빙글 돌며
+                    # 위치가 미세하게 바뀌어도 동점 평가 결과가 흔들리지 않게 하여
+                    # 목표 구역이 계속 바뀌는(출렁임) 현상을 막는다.
+                    eval_origin = self.macro_centers[quad_idx]
+                    danger_costs = np.array([self._path_danger_cost(eval_origin, tc) for tc in target_centers])
                     dest_danger = np.array([max(0.0, 80.0 - self._min_dist_to_obs(tc)) for tc in target_centers])
                     total_costs  = danger_costs * 6.0 + dest_danger * 15.0  # 장애물 기피 완화
                     best_target  = int(candidates[np.argmin(total_costs)])
@@ -464,4 +502,13 @@ class DroneEnv:
             reward = step_penalty + drive_reward + approach_reward + soft_penalty + macro_crossing_bonus
 
         self.prev_bpsk_rssi = curr_bpsk
-        return self.get_state(), reward, self.steps >= MAX_STEPS, "Normal"
+
+        # ── 타임아웃 처리 ──
+        # MAX_STEPS를 다 쓰고도 목표(Target Found)에 도달하지 못한 채 끝나면
+        # "그냥 안전하게 떠다니며 시간 버티기"가 이득이 되지 않도록 패널티를 준다.
+        # (목표 도달은 위에서 +5000으로 이미 종료 처리되므로 여기 도달하면 미도달 = 실패)
+        if self.steps >= MAX_STEPS:
+            reward += -1500.0
+            return self.get_state(), reward, True, "Timeout"
+
+        return self.get_state(), reward, False, "Normal"

@@ -1316,26 +1316,26 @@ class App:
             pygame.draw.line(self.screen, (58, 63, 82), (px+8, y), (px+PANEL_W-8, y)); y += 8
 
             # ── Signal Detection (AMC) ────────────────────────────────────
-            self.screen.blit(self.fn_m.render('Signal', True, TITLE_COL), (px + 14, y)); y += 4
+            self.screen.blit(self.fn_m.render('Signal', True, TITLE_COL), (px + 14, y)); y += 22
             sig_type  = getattr(self.env, 'detected_signal_type', 0)
             sig_names = {0: 'none', 1: 'BPSK', 2: 'QAM'}
             sig_cols  = {0: DIM_COL, 1: BPSK_COL, 2: QAM_COL}
             sig_text  = sig_names.get(sig_type, 'none')
             sig_col   = sig_cols.get(sig_type, DIM_COL)
             # 감지 상태 박스
-            sig_rect = pygame.Rect(px + 14, y, PANEL_W - 28, 28)
+            sig_rect = pygame.Rect(px + 14, y, PANEL_W - 28, 26)
             pygame.draw.rect(self.screen, (30, 34, 48), sig_rect, border_radius=5)
             if sig_type != 0:
                 pygame.draw.rect(self.screen, sig_col, sig_rect, 1, border_radius=5)
             sig_surf = self.fn_l.render(sig_text, True, sig_col)
             self.screen.blit(sig_surf, sig_surf.get_rect(center=sig_rect.center))
-            y += 36
+            y += 32
 
             pygame.draw.line(self.screen, (58, 63, 82), (px+8, y), (px+PANEL_W-8, y)); y += 8
 
             # ── Belief 3×3 히트맵 ────────────────────────────────────────
-            self.screen.blit(self.fn_m.render('Belief Map', True, TITLE_COL), (px + 14, y)); y += 22
-            cell = 90
+            self.screen.blit(self.fn_m.render('Belief Map', True, TITLE_COL), (px + 14, y)); y += 20
+            cell = 70
             bx = px + (PANEL_W - cell * 3) // 2
             belief = self.env.belief
             for r_i in range(3):
@@ -1349,14 +1349,14 @@ class App:
                     self.screen.blit(
                         self.fn_s.render(f'{prob*100:.0f}%', True, WHITE),
                         self.fn_s.render(f'{prob*100:.0f}%', True, WHITE).get_rect(center=rect.center))
-            y += cell * 3 + 8
+            y += cell * 3 + 6
 
             # ── 라이다 레이더 미니맵 ──────────────────────────────────────
-            pygame.draw.line(self.screen, (58, 63, 82), (px+8, y), (px+PANEL_W-8, y)); y += 8
-            self.screen.blit(self.fn_m.render('LiDAR', True, TITLE_COL), (px + 14, y)); y += 20
+            pygame.draw.line(self.screen, (58, 63, 82), (px+8, y), (px+PANEL_W-8, y)); y += 6
+            self.screen.blit(self.fn_m.render('LiDAR', True, TITLE_COL), (px + 14, y)); y += 18
             radar_cx = px + PANEL_W // 2
-            radar_cy = y + 55
-            radar_r  = 52
+            radar_cy = y + 44
+            radar_r  = 42
             pygame.draw.circle(self.screen, (50, 55, 70), (radar_cx, radar_cy), radar_r)
             pygame.draw.circle(self.screen, (70, 75, 95), (radar_cx, radar_cy), radar_r, 1)
             pygame.draw.circle(self.screen, (58, 63, 82), (radar_cx, radar_cy), radar_r//2, 1)
