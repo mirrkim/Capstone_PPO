@@ -35,9 +35,9 @@ def make_env():
     return GymDroneEnv()
 
 def train():
-    num_envs      = 16   # 한번에 날아가는 드론 수 (메모리 한계로 16 고정)
+    num_envs      = 32   # 한번에 날아가는 드론 수 (메모리 한계로 16 고정)
     steps_per_env = 128
-    max_updates   = 300
+    max_updates   = 1000
     
     initial_entropy = 0.02
     min_entropy     = 0.005
