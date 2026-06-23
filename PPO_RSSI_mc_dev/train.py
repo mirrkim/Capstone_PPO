@@ -35,22 +35,22 @@ def make_env():
     return GymDroneEnv()
 
 def train():
-    num_envs      = 32   # 한번에 날아가는 드론 수 (메모리 한계로 16 고정)
+    num_envs      = 16   # 한번에 날아가는 드론 수 (메모리 한계로 16 고정)
     steps_per_env = 128
     max_updates   = 1000
     
     initial_entropy = 0.02
     min_entropy     = 0.005
-    warmup_updates  = 100           # 이 구간은 entropy 고정 (탐험 보장)
+    warmup_updates  = 200           # 이 구간은 entropy 고정 (탐험 보장)
 
     envs      = AsyncVectorEnv([make_env for _ in range(num_envs)])
     dummy_env = DroneEnv()
     agent     = PPO(dummy_env.state_dim, dummy_env.action_dim)
 
     ## 이어서 학습하기
-    if os.path.exists('ppo_drone_best.pth'):
-        agent.policy.load_state_dict(torch.load('ppo_drone_best.pth'))
-        print("🚀 [Load] 기존 베스트 모델을 로드했습니다.")
+#    if os.path.exists('ppo_drone_best.pth'):
+#        agent.policy.load_state_dict(torch.load('ppo_drone_best.pth'))
+#        print("🚀 [Load] 기존 베스트 모델을 로드했습니다.")
   
     episode_rewards   = []
     episode_endings   = []
@@ -142,8 +142,8 @@ def train():
                   f"Avg(100): {avg_100:8.2f} | "
                   f"✅{succ_pct:4.1f}% 💥{crash_pct:4.1f}% | ")
 
-        if update > 50:
-            agent.save_if_best(np.mean(episode_rewards[-num_envs:]), 'ppo_drone_best.pth')
+        if update > 50 and episode_rewards:
+            agent.save_if_best(float(np.mean(episode_rewards[-100:])), 'ppo_drone_best.pth')
 
     envs.close()
     

@@ -69,8 +69,12 @@ class PPO:
         return action.cpu().numpy(), log_prob.cpu().numpy(), value.cpu().numpy().flatten()
 
     def save_if_best(self, current_reward, path="best_model.pth"):
-        self.reward_window.append(current_reward)
-        if current_reward >= max(self.reward_window):
+        # 역대 최고(all-time best)일 때만 저장한다.
+        # 기존: 최근 50개(deque) 내 상대 최대값 → 진짜 최고가 아닌 모델이 저장될 수 있었음.
+        if not hasattr(self, "best_reward"):
+            self.best_reward = -float("inf")
+        if current_reward > self.best_reward:
+            self.best_reward = current_reward
             torch.save(self.policy.state_dict(), path)
             print(f"✨ New Best Saved: {current_reward:.2f}")
 
