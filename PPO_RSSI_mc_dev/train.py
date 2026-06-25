@@ -35,13 +35,13 @@ def make_env():
     return GymDroneEnv()
 
 def train():
-    num_envs      = 16   # 한번에 날아가는 드론 수 (메모리 한계로 16 고정)
-    steps_per_env = 128
+    num_envs      = 32   # 한번에 날아가는 드론 수 (메모리 한계로 16 고정)
+    steps_per_env = 256
     max_updates   = 1000
     
     initial_entropy = 0.02
     min_entropy     = 0.005
-    warmup_updates  = 200           # 이 구간은 entropy 고정 (탐험 보장)
+    warmup_updates  = 100           # 이 구간은 entropy 고정 (탐험 보장)
 
     envs      = AsyncVectorEnv([make_env for _ in range(num_envs)])
     dummy_env = DroneEnv()
