@@ -1411,22 +1411,28 @@ class App:
     #  메인 루프
     # =================================================================
     def run(self):
+        frame_counter = 0
+        DRONE_STEP_EVERY = 3        # ← 드론 탐색: 3프레임마다 1스텝
+        FORMATION_STEP_EVERY = 3    # ← 편대/localization: 2프레임마다 1스텝
         while True:
             events = pygame.event.get()
+            frame_counter += 1
             if self.mode in ('running', 'followers_catchup', 'ready_localization', 'formation_move', 'done'):
                 self._sim_events(events)
                 if self.mode == 'running':
-                    self._sim_step()
+                    if frame_counter % DRONE_STEP_EVERY == 0:        # ← 드론용
+                        self._sim_step()
                 elif self.mode == 'followers_catchup':
-                    self._followers_catchup_step()
+                    if frame_counter % FORMATION_STEP_EVERY == 0:    # ← 편대용
+                        self._followers_catchup_step()
                 elif self.mode == 'formation_move':
-                    self._formation_move_step()
+                    if frame_counter % FORMATION_STEP_EVERY == 0:    # ← 편대용
+                        self._formation_move_step()
                 self._render_simulation()
             else:
                 self._editor_events(events)
                 self._render_editor()
-            self.clock.tick(30)
-
+            self.clock.tick(60)
 
 if __name__ == '__main__':
     app = App()

@@ -70,7 +70,7 @@ def _seg_intersect_rect(p1, p2, rect):
             x2, y2, c2 = x, y, code(x, y)
 
 
-def is_nlos(drone_pos, target_pos):
+def is_nlos(drone_pos, target_pos): # 
     """
     Full NLOS if the drone-target straight path intersects an obstacle.
     """
@@ -224,7 +224,7 @@ class RealDataChannel:
 # Distance estimation and trilateration
 # ============================================================
 def dist_from_rssi_baseline(rssi_mean, A0=-40.85, n=2.201):
-    return np.power(10.0, (A0 - rssi_mean) / (10.0 * n))
+    return np.power(10.0, (A0 - rssi_mean) / (10.0 * n)) # Baseline 거리 산출
 
 
 def trilat_2d_ls(A, d):
@@ -233,7 +233,6 @@ def trilat_2d_ls(A, d):
     x3, y3 = A[2]
 
     d1, d2, d3 = float(d[0]), float(d[1]), float(d[2])
-
     M = np.array([
         [2 * (x2 - x1), 2 * (y2 - y1)],
         [2 * (x3 - x1), 2 * (y3 - y1)],

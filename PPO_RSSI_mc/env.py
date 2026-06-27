@@ -15,7 +15,7 @@ import scipy.ndimage
 
 # NumPy 버전에 따라 존재하는 전용 경고 클래스도 함께 억제
 try:
-    warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning) 
+    warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)
 except AttributeError:
     pass
 
@@ -25,7 +25,7 @@ except AttributeError:
 MAP_SIZE           = 700
 START_POS          = np.array([30.0, 30.0])
 MIN_OBS_COUNT      = 5
-MAX_OBS_COUNT      = 7           
+MAX_OBS_COUNT      = 7
 OBS_RADIUS_MIN     = 40.0 
 OBS_RADIUS_MAX     = 90.0 
 BPSK_SIGNAL_RADIUS  = 250
@@ -34,7 +34,7 @@ TARGET_RSSI_THRESHOLD = 0.85
 MAX_STEPS = 512
 TARGET_MODE = 'random'
 
-AMC_CLASSIFY_INTERVAL = 5    # 한 번 감지하면 스텝 동안 결과 고정!
+AMC_CLASSIFY_INTERVAL = 5    # 한 번 감지하면 9999스텝 동안 결과 고정!
 
 BELIEF_DECAY        = 0.95
 BELIEF_FREEZE_STEPS = int(MAP_SIZE * 0.01)   
@@ -49,7 +49,7 @@ LIDAR_MAX_RANGE = 100.0
 # 드론이 탐색한 영역을 색칠로 기록하는 격자(70x70, 한 칸 = 10x10px).
 # 값: 0=미탐색, 1=탐색됨(드론이 지나가며 본 영역), 2=장애물 감지 지점
 COVERAGE_N = 70
-COVERAGE_REWARD_SCALE = 5   # 색칠 보상 스케일(새 칸 × belief지수가중 × 이 값)
+COVERAGE_REWARD_SCALE = 2.0   # 색칠 보상 스케일(새 칸 × belief지수가중 × 이 값)
 # 색칠 반경: 드론이 한 스텝에 칠하는 범위. LiDAR(100)보다 살짝 크게.
 # (신호 감지 범위 250과는 별개 — 색칠은 '드론이 둘러본 영역', 신호는 '목표 감지')
 COVERAGE_PAINT_RADIUS = 120.0
@@ -288,14 +288,14 @@ class DroneEnv:
         dists = self.sdf_map[cy, cx]
         hit = dists < margin
         return float(np.sum(margin - dists[hit]))
-    
-    def _calc_soft_penalty(self, pos, min_dist_obs, obs_margin=30.0, near_crash_margin=10.0, in_signal=False): 
+
+    def _calc_soft_penalty(self, pos, min_dist_obs, obs_margin=50.0, near_crash_margin=20.0, in_signal=False):
         scale = 2.0 if in_signal else 1.0
         soft = 0.0
         if min_dist_obs < obs_margin:
             soft -= ((obs_margin - min_dist_obs) / obs_margin) ** 2 * 150.0 * scale
         if min_dist_obs < near_crash_margin:
-            soft -= 200.0 * scale
+            soft -= 300.0 * scale
         return soft
 
     def reset(self):
@@ -344,6 +344,7 @@ class DroneEnv:
                 pass
             # compile=False: 추론만 하므로 metric 컴파일 생략 → compile_metrics 경고 제거
             self._amc_model = tf.keras.models.load_model('my_amc_model.h5', compile=False)
+            print('[AMC] CNN 모델 로드 완료')
         except Exception as e:
             print(f'[AMC] 모델 로드 실패: {e}')
             self._amc_model = None
@@ -354,6 +355,7 @@ class DroneEnv:
                 self._rml_raw = pickle.load(f, encoding='latin1')
             self._mods      = sorted(set(k[0] for k in self._rml_raw.keys()))
             self._snrs_list = sorted(set(k[1] for k in self._rml_raw.keys()))
+            print(f'[AMC] 데이터셋 로드 완료  변조: {self._mods}')
         except Exception as e:
             print(f'[AMC] 데이터셋 로드 실패: {e}')
             self._rml_raw = None
@@ -408,7 +410,9 @@ class DroneEnv:
             return (raw_bpsk if self._amc_cache_type == 1 else 0.0), self._amc_cache_type
 
         # AMC 분류 실행
-        if raw_bpsk >= raw_qam:
+        # BPSK가 감지되면(범위 안이면) QAM보다 우선해서 BPSK로 분류한다.
+        # (목표는 BPSK 신호원이므로, QAM이 더 강해도 BPSK가 잡히면 BPSK를 따라간다)
+        if raw_bpsk > 0.0:
             pred = self._classify_signal('BPSK',  raw_bpsk)
         else:
             pred = self._classify_signal('QAM16', raw_qam)
@@ -487,10 +491,10 @@ class DroneEnv:
         new_pos = self.drone_pos + velocity * 8.0
 
         if new_pos[0] < 0 or new_pos[0] > self.map_size or new_pos[1] < 0 or new_pos[1] > self.map_size:
-            return self.get_state(), -1500.0, True, "Wall Crash"
+            return self.get_state(), -2000.0, True, "Wall Crash"
         
         if self._min_dist_to_obs(new_pos) < 2.0:
-            return self.get_state(), -2000.0, True, "Obs Crash"
+            return self.get_state(), -3000.0, True, "Obs Crash"
 
         self.drone_pos = new_pos
         self.steps    += 1
@@ -507,7 +511,7 @@ class DroneEnv:
         macro_crossing_bonus = 0.0
         if quad_idx != self.current_macro:
             if quad_idx not in self.visited_quad_history:
-                macro_crossing_bonus = 250.0 # 새 구역 처음 진입 보너스
+                macro_crossing_bonus = 250.0
             self.current_macro = quad_idx
             self.chosen_target = -1 
             self.visited_quad_history.append(quad_idx)
@@ -553,12 +557,12 @@ class DroneEnv:
             # 방향/거리를 쓰지 않고 '결과(색칠)'에 보상하므로 목표 출렁임이 없다.
             # 동점이어도 둘 중 아무 구역이나 칠하면 보상 → 가까운 곳부터 칠하러 감.
             #
-            # belief 지수 가중: w = exp(10*(belief - 0.13))  
+            # belief 지수 가중: w = exp(8*(belief - 0.13))
             #   기준점 0.13(거의 균등=1/9≈0.11)이라, belief가 균등한 초·중반에도
             #   보상이 미지근하지 않게 한다(과감성 확보). 높은 구역은 여전히 급증.
-            #   - belief 11% → w = 0.8 , 13% → 1.0(기준), 20% → 2, 30% → 5.5, 40% → 14.9
-            weight = np.exp(10.0 * (belief_before - 0.13))   
-            paint_reward = float(np.sum(new_cells * weight)) * COVERAGE_REWARD_SCALE 
+            #   - 11% → 0.85, 13% → 1.0(기준), 20% → 1.75, 30% → 3.9, 40% → 8.7
+            weight = np.exp(8.0 * (belief_before - 0.13))   # (9,)
+            paint_reward = float(np.sum(new_cells * weight)) * COVERAGE_REWARD_SCALE
 
             reward = step_penalty + paint_reward + soft_penalty + macro_crossing_bonus
 
@@ -569,7 +573,7 @@ class DroneEnv:
         # "그냥 안전하게 떠다니며 시간 버티기"가 이득이 되지 않도록 패널티를 준다.
         # (목표 도달은 위에서 +5000으로 이미 종료 처리되므로 여기 도달하면 미도달 = 실패)
         if self.steps >= MAX_STEPS:
-            reward += -2000.0
+            reward += -1500.0
             return self.get_state(), reward, True, "Timeout"
 
         return self.get_state(), reward, False, "Normal"
